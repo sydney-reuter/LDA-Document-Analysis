@@ -1,0 +1,209 @@
+# set working directory
+# LIBRARIES
+library(readtext)
+library(pdftools)
+library(tidyverse)
+library(tidytext)
+library(textstem)
+library(textdata)
+library(widyr)
+library(tm)
+library(reshape2)
+library(igraph)
+library(ggraph)
+library(wordcloud)
+library(topicmodels)
+library(happyorsad)
+library(BRRR)
+library(text2vec)
+
+# LOAD/EDIT DATA
+my.data <- data.frame()
+file.list <- list.files(pattern = "*.pdf", recursive = TRUE)
+
+for (file in file.list) {
+  tmp.data <- data.frame(pdf_text(file))
+  tmp.data$file <- file
+  names(tmp.data) <- c("text", "file")
+  my.data <- rbind(tmp.data, my.data)
+}
+
+my.data$file.ID <- seq.int(nrow(my.data))
+my.data$text <- as.character(my.data$text)
+my.words <- my.data %>% 
+  unnest_tokens(word, text)
+my.words$word.ID <- seq.int(nrow(my.words))
+my.stems <- stem_words(my.words$word)
+my.stems <- as.data.frame(unlist(my.stems))
+my.stems$word.ID <- seq.int(nrow(my.stems))
+names(my.stems) <- c("stem.word", "word.ID")
+
+my.stem.words <- my.words %>% 
+  inner_join(my.stems)
+names(my.stem.words) <- c("file", "file.ID", "original.word", "word.ID", "word")
+
+stop_words$word.ID <- seq.int(nrow(stop_words))
+stops.stemmed <- stem_words(stop_words$word)
+stops.stemmed <- as.data.frame(unlist(stops.stemmed))
+stops.stemmed$word.ID <- seq.int(nrow(stops.stemmed))
+stops.stemmed$lexicon <- "Stemmed Stopword"
+names(stops.stemmed) <- c("word", "word.ID", "lexicon")
+all.stops <- rbind(stop_words, stops.stemmed)
+
+no.stop.words <- my.stem.words %>% anti_join(all.stops, by = "word")
+names(no.stop.words) <- c("file", "file.ID", "word", "word.ID", "stem.word")
+
+tmp.clean.words <- no.stop.words[grep("^[[:digit:]]", no.stop.words$word), ]
+my.clean.words <- no.stop.words %>% anti_join(tmp.clean.words, by = "word")
+
+## METHODS
+### add sentiment to words
+afinn <- my.clean.words %>%
+  inner_join(get_sentiments("afinn"))
+
+### get word count
+word.count <- my.clean.words %>%
+  count(word, sort = TRUE)
+
+### get word count with sentiment
+sentiment.count <- afinn %>%
+  count(word, value, sort = TRUE)
+
+top.sentiment <- subset(sentiment.count, n >= quantile(sentiment.count$n, 0.99))
+top.words <- subset(word.count, n >= quantile(word.count$n, 0.999))
+
+#topic modeling - LDA
+my.clean.words <- my.clean.words %>%
+  mutate(Sentiment = map_int(my.clean.words$word,happyorsad,"da"))
+words_topic <- my.clean.words %>%
+  count(file, word, sort = TRUE) %>%
+  ungroup()
+
+reviewDTM <- words_topic %>%
+  cast_dtm(file, word, n)
+
+## making topics (k = 15, paper gives choice reasoning)
+reviewLDA <- LDA(reviewDTM, k = 15, control = list(seed = 347))
+
+topics <- tidy(reviewLDA, matrix = "beta")
+
+topTerms <- topics %>%
+  group_by(topic) %>%
+  top_n(9, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  mutate(order = rev(row_number()))
+
+# VISUALS - OUTPUT
+
+## Question 1: What are the common topics and themes?
+### word count bar chart - all words
+ggplot(top.words, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_classic() +
+  labs(x = "Word", y = "Count", title = "Word Counts for top 0.01% of Data")
+
+### word count bar chart - with sentiment
+ggplot(top.sentiment, aes(x= reorder(word, n), y=n, fill= value)) + 
+  coord_flip() +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(x = "Word", y = "Count", fill = "Sentiment Score", title = "Word count with Sentiment for top 1% of Data")
+
+### LDA bar chart - top 15 topics
+plot_topics <- topTerms %>%
+  ggplot(aes(order, beta)) +
+  ggtitle("Topics") +
+  geom_col(show.legend = FALSE, fill = "steelblue") +
+  scale_x_continuous(
+    breaks = topTerms$order,
+    labels = topTerms$term,
+    expand = c(0,0)) +
+  facet_wrap(~ topic,scales = "free") +
+  coord_flip(ylim = c(0,0.02)) +
+  theme(axis.title = element_blank())
+plot_topics
+
+
+## Question 2: Who writes about what?
+
+# prep for bar chart
+topics_per_doc <- tidy(reviewLDA, matrix = "gamma")
+topics_per_doc$document <- substr(topics_per_doc$document, 1, nchar(topics_per_doc$document) - 4)
+topics_per_doc$document <- tolower(topics_per_doc$document)
+topics_per_doc$topic<-factor(topics_per_doc$topic)
+
+# bar chart - proportion of words per topic per article
+ggplot(topics_per_doc, aes(x = document, y = gamma, fill = topic)) +
+  geom_bar(stat = "identity", color = 'white') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Document", y = "Proportion of Words", title = "Topics per Author", fill = 'Topic') +
+  scale_fill_viridis(discrete = TRUE)
+
+## Question 3: What differs by researcher?
+
+# repeat bar chart topics
+plot_topics <- topTerms %>%
+  ggplot(aes(order, beta)) +
+  ggtitle("Topics") +
+  geom_col(show.legend = FALSE, fill = "steelblue") +
+  scale_x_continuous(
+    breaks = topTerms$order,
+    labels = topTerms$term,
+    expand = c(0,0)) +
+  facet_wrap(~ topic,scales = "free") +
+  coord_flip(ylim = c(0,0.02)) +
+  theme(axis.title = element_blank())
+plot_topics
+
+# NETWORK ANALYSIS - topics 3 and 11, primary articles per topic chosen
+topic_three<-topics_per_doc %>%
+  filter(topic == 3)
+
+topic_eleven<-topics_per_doc %>%
+  filter(topic == 11)
+
+# network chart for weisburd 2015 - topic 3
+weisburd <- subset(my.clean.words, file == "Weisburd 2015.pdf")
+counts.weisburd <- weisburd %>%
+  count(word, sort = TRUE)
+top.weisburd <- subset(counts.weisburd, n >= quantile(counts.weisburd$n, 0.99))
+wordpairs.weisburd <- weisburd %>%
+  pairwise_count(word, file.ID, sort = TRUE)
+
+pairs.weisburd <- wordpairs.weisburd %>%
+  filter(n >= 14) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "steelblue") +
+  ggtitle("Word Pairs for Weisburd 2015 (Topic 3)") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE,
+                 point.padding = unit(0.2, "lines")) +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+pairs.weisburd
+
+# network chart for wu koper lum 2022 - topic 11
+wu <- subset(my.clean.words, file == "wu koper lum 2022.pdf")
+counts.wu <- wu %>%
+  count(word, sort = TRUE)
+top.wu <- subset(counts.wu, n >= quantile(counts.wu$n, 0.99))
+wordpairs.wu <- wu %>%
+  pairwise_count(word, file.ID, sort = TRUE)
+
+pairs.wu <- wordpairs.wu %>%
+  filter(n >= 16) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "steelblue") +
+  ggtitle("Word Pairs for Wu Koper Lum 2022 (Topic 11)") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE,
+                 point.padding = unit(0.2, "lines")) +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+pairs.wu
