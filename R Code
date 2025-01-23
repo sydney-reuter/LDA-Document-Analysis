@@ -18,6 +18,7 @@ library(BRRR)
 library(text2vec)
 
 # LOAD/EDIT DATA
+## per professor instructions
 my.data <- data.frame()
 file.list <- list.files(pattern = "*.pdf", recursive = TRUE)
 
@@ -57,7 +58,7 @@ tmp.clean.words <- no.stop.words[grep("^[[:digit:]]", no.stop.words$word), ]
 my.clean.words <- no.stop.words %>% anti_join(tmp.clean.words, by = "word")
 
 ## METHODS
-### add sentiment to words
+### add sentiment to words, per professor instructions
 afinn <- my.clean.words %>%
   inner_join(get_sentiments("afinn"))
 
@@ -72,7 +73,7 @@ sentiment.count <- afinn %>%
 top.sentiment <- subset(sentiment.count, n >= quantile(sentiment.count$n, 0.99))
 top.words <- subset(word.count, n >= quantile(word.count$n, 0.999))
 
-#topic modeling - LDA
+# topic modeling - LDA
 my.clean.words <- my.clean.words %>%
   mutate(Sentiment = map_int(my.clean.words$word,happyorsad,"da"))
 words_topic <- my.clean.words %>%
